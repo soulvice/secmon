@@ -21,7 +21,9 @@ The secmon-daemon provides a complete NixOS flake with integrated service config
 
 ```nix
 {
-  imports = [ secmon.nixosModules.default ];
+  imports = [
+    inputs.secmon.nixosModules.default
+  ];
 
   services.secmon.enable = true;
 }
@@ -126,8 +128,14 @@ secmon-client
 
 ### Connect to event stream
 ```bash
-# Using included client
-secmon-client
+# Human-readable output
+secmon-client monitor
+
+# JSON output for automation/logging
+secmon-client monitor --json
+
+# Filter by severity (only high/critical events)
+secmon-client monitor --json --severity-high
 
 # Using raw socket connection
 socat UNIX-CONNECT:/run/secmon/secmon.sock - | jq .
@@ -161,7 +169,8 @@ systemd.services.secmon-alerts = {
   wantedBy = [ "multi-user.target" ];
 
   script = ''
-    ${secmon.packages.x86_64-linux.default}/bin/secmon-client | while read -r event; do
+    # Use JSON mode with severity filtering for automation
+    ${secmon.packages.x86_64-linux.default}/bin/secmon-client monitor --json --severity-high | while read -r event; do
       # Process event JSON
       echo "$event" | jq .
 

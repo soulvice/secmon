@@ -11,92 +11,16 @@
   };
 
   outputs = { self, nixpkgs, flake-utils, rust-overlay }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        overlays = [ (import rust-overlay) ];
-        pkgs = import nixpkgs {
-          inherit system overlays;
-        };
-
-        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
-          extensions = [ "rust-src" "rustfmt" "clippy" ];
-        };
-
-        secmon-daemon = pkgs.rustPlatform.buildRustPackage {
-          pname = "secmon-daemon";
-          version = "0.1.0";
-
-          src = ./.;
-
-          cargoLock = {
-            lockFile = ./Cargo.lock;
-          };
-
-          nativeBuildInputs = with pkgs; [
-            pkg-config
-            rustToolchain
-          ];
-
-          buildInputs = with pkgs; [
-            systemd
-            udev
-            alsa-lib
-          ] ++ lib.optionals stdenv.isDarwin [
-            darwin.apple_sdk.frameworks.Security
-            darwin.apple_sdk.frameworks.SystemConfiguration
-          ];
-
-          # Required for udev access
-          postInstall = ''
-            mkdir -p $out/lib/udev/rules.d
-            cat > $out/lib/udev/rules.d/99-secmon.rules << EOF
-            # Allow secmon-daemon to access USB devices
-            SUBSYSTEM=="usb", GROUP="secmon", MODE="0664"
-            EOF
-          '';
-
-          meta = with pkgs.lib; {
-            description = "Security monitoring daemon for Linux filesystem and hardware events";
-            homepage = "https://github.com/your-username/secmon-daemon";
-            license = licenses.mit;
-            maintainers = [ maintainers.yourname ];
-            platforms = platforms.linux;
-          };
-        };
-
-      in
-      {
-        packages.default = secmon-daemon;
-        packages.secmon-daemon = secmon-daemon;
-
-        devShells.default = pkgs.mkShell {
-          buildInputs = with pkgs; [
-            rustToolchain
-            pkg-config
-            systemd
-            udev
-            alsa-lib
-            # Development tools
-            rust-analyzer
-            cargo-watch
-            cargo-edit
-          ];
-
-          shellHook = ''
-            echo "🦀 Rust development environment for secmon-daemon"
-            echo "📦 Available commands:"
-            echo "  cargo build --release  # Build the daemon"
-            echo "  cargo run -- config.toml  # Run with config"
-            echo "  cargo test             # Run tests"
-          '';
-        };
-
-        # NixOS module
-        nixosModules.default = { config, lib, pkgs, ... }:
+    let
+      # NixOS modules are system-agnostic, so define them at the top level
+      nixosModules = {
+        default = { config, lib, pkgs, ... }:
           let
             cfg = config.services.secmon;
             settingsFormat = pkgs.formats.toml { };
             configFile = settingsFormat.generate "secmon-config.toml" cfg.settings;
+            # Get the secmon package for the current system
+            secmon-daemon = self.packages.${pkgs.system}.secmon-daemon or (throw "secmon-daemon package not available for system ${pkgs.system}");
           in
           {
             options.services.secmon = {
@@ -251,7 +175,7 @@
               # Systemd service
               systemd.services.secmon = {
                 description = "Security Monitor Daemon";
-                documentation = [ "https://github.com/your-username/secmon-daemon" ];
+                documentation = [ "https://github.com/soulvice/secmon-daemon" ];
                 after = [ "network.target" "systemd-udev-settle.service" ];
                 wants = [ "network.target" ];
                 wantedBy = [ "multi-user.target" ];
@@ -302,5 +226,91 @@
               environment.systemPackages = [ cfg.package ];
             };
           };
+      };
+    in
+    {
+      # Export nixosModules at the top level
+      inherit nixosModules;
+    } //
+    flake-utils.lib.eachDefaultSystem (system:
+      let
+        overlays = [ (import rust-overlay) ];
+        pkgs = import nixpkgs {
+          inherit system overlays;
+        };
+
+        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+          extensions = [ "rust-src" "rustfmt" "clippy" ];
+        };
+
+        secmon-daemon = pkgs.rustPlatform.buildRustPackage {
+          pname = "secmon-daemon";
+          version = "0.1.0";
+
+          src = ./.;
+
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+          };
+
+          nativeBuildInputs = with pkgs; [
+            pkg-config
+            rustToolchain
+          ];
+
+          buildInputs = with pkgs; [
+            systemd
+            udev
+            alsa-lib
+          ] ++ lib.optionals stdenv.isDarwin [
+            darwin.apple_sdk.frameworks.Security
+            darwin.apple_sdk.frameworks.SystemConfiguration
+          ];
+
+          # Required for udev access
+          postInstall = ''
+            mkdir -p $out/lib/udev/rules.d
+            cat > $out/lib/udev/rules.d/99-secmon.rules << EOF
+            # Allow secmon-daemon to access USB devices
+            SUBSYSTEM=="usb", GROUP="secmon", MODE="0664"
+            EOF
+          '';
+
+          meta = with pkgs.lib; {
+            description = "Security monitoring daemon for Linux filesystem and hardware events";
+            homepage = "https://github.com/your-username/secmon-daemon";
+            license = licenses.mit;
+            maintainers = [ maintainers.yourname ];
+            platforms = platforms.linux;
+          };
+        };
+
+      in
+      {
+        packages.default = secmon-daemon;
+        packages.secmon-daemon = secmon-daemon;
+
+        devShells.default = pkgs.mkShell {
+          buildInputs = with pkgs; [
+            rustToolchain
+            pkg-config
+            systemd
+            udev
+            alsa-lib
+            # Development tools
+            rust-analyzer
+            cargo-watch
+            cargo-edit
+          ];
+
+          shellHook = ''
+            echo "🦀 Rust development environment for secmon-daemon"
+            echo "📦 Available commands:"
+            echo "  cargo build --release  # Build the daemon"
+            echo "  cargo run -- config.toml  # Run with config"
+            echo "  cargo test             # Run tests"
+          '';
+        };
+
       });
 }
