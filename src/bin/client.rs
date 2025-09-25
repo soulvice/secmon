@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -81,8 +82,29 @@ async fn main() -> Result<()> {
             daemon_logs(lines).await
         }
         "monitor" => {
-            let socket_path = args.get(2).cloned().unwrap_or_else(|| "/tmp/secmon.sock".to_string());
-            monitor_events(&socket_path).await
+            let mut socket_path = "/tmp/secmon.sock".to_string();
+            let mut json_mode = false;
+            let mut filter_severity: Option<Severity> = None;
+
+            // Parse arguments starting from index 2
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--json" | "-j" => json_mode = true,
+                    "--severity-low" => filter_severity = Some(Severity::Low),
+                    "--severity-medium" => filter_severity = Some(Severity::Medium),
+                    "--severity-high" => filter_severity = Some(Severity::High),
+                    "--severity-critical" => filter_severity = Some(Severity::Critical),
+                    arg if !arg.starts_with("--") && !arg.starts_with("-") => {
+                        // This is the socket path
+                        socket_path = arg.to_string();
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+
+            monitor_events(&socket_path, json_mode, filter_severity).await
         }
         "--help" | "-h" => {
             print_client_help();
@@ -91,7 +113,7 @@ async fn main() -> Result<()> {
         _ => {
             // Backward compatibility: if first arg looks like a socket path, use old behavior
             if command.starts_with('/') || command.starts_with('.') {
-                monitor_events(command).await
+                monitor_events(command, false, None).await
             } else {
                 eprintln!("Error: Unknown command '{}'", command);
                 print_client_help();
@@ -113,7 +135,7 @@ fn print_client_help() {
     println!("    restart [CONFIG]   Restart the daemon");
     println!("    status             Show daemon status");
     println!("    logs [LINES]       Show daemon logs (default: 50 lines)");
-    println!("    monitor [SOCKET]   Monitor security events (default: /tmp/secmon.sock)");
+    println!("    monitor [SOCKET] [--json]  Monitor security events (default: /tmp/secmon.sock)");
     println!("    help, --help, -h   Show this help message");
     println!();
     println!("EXAMPLES:");
@@ -123,10 +145,11 @@ fn print_client_help() {
     println!("    secmon-client status                   # Check daemon status");
     println!("    secmon-client logs                     # Show last 50 log lines");
     println!("    secmon-client logs 100                 # Show last 100 log lines");
-    println!("    secmon-client monitor                  # Monitor events");
+    println!("    secmon-client monitor                  # Monitor events (human readable)");
+    println!("    secmon-client monitor /tmp/secmon.sock --json  # Monitor events (JSON output)");
 }
 
-async fn monitor_events(socket_path: &str) -> Result<()> {
+async fn monitor_events(socket_path: &str, json_mode: bool, filter_severity: Option<Severity>) -> Result<()> {
     info!("Connecting to secmon daemon at: {}", socket_path);
 
     let stream = UnixStream::connect(&socket_path)
@@ -136,9 +159,14 @@ async fn monitor_events(socket_path: &str) -> Result<()> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
 
-    info!("Connected! Listening for security events...");
-    println!("Timestamp | Severity | Type | Path | Description");
-    println!("---------|----------|------|------|-------------");
+    if json_mode {
+        info!("Connected! Streaming JSON events...");
+        // In JSON mode, output events directly without headers
+    } else {
+        info!("Connected! Listening for security events...");
+        println!("Timestamp | Severity | Type | Path | Description");
+        println!("---------|----------|------|------|-------------");
+    }
 
     loop {
         line.clear();
@@ -150,7 +178,32 @@ async fn monitor_events(socket_path: &str) -> Result<()> {
             Ok(_) => {
                 match serde_json::from_str::<SecurityEvent>(&line.trim()) {
                     Ok(event) => {
-                        handle_security_event(&event);
+                        // Apply severity filter if specified
+                        if let Some(min_severity) = &filter_severity {
+                            let event_severity_level = match event.details.severity {
+                                Severity::Low => 1,
+                                Severity::Medium => 2,
+                                Severity::High => 3,
+                                Severity::Critical => 4,
+                            };
+                            let min_severity_level = match min_severity {
+                                Severity::Low => 1,
+                                Severity::Medium => 2,
+                                Severity::High => 3,
+                                Severity::Critical => 4,
+                            };
+
+                            // Skip events below the minimum severity
+                            if event_severity_level < min_severity_level {
+                                continue;
+                            }
+                        }
+
+                        if json_mode {
+                            handle_json_event(&event);
+                        } else {
+                            handle_security_event(&event);
+                        }
                     }
                     Err(e) => {
                         error!("Failed to parse event: {} - Line: {}", e, line.trim());
@@ -355,6 +408,47 @@ fn get_daemon_path() -> Result<String> {
     } else {
         // Fall back to looking in PATH
         Ok("secmon-daemon".to_string())
+    }
+}
+
+fn handle_json_event(event: &SecurityEvent) {
+    // Output raw JSON with additional metadata for streaming
+    let json_event = serde_json::json!({
+        "timestamp": event.timestamp,
+        "event_type": event.event_type,
+        "path": event.path,
+        "severity": event.details.severity,
+        "description": event.details.description,
+        "metadata": event.details.metadata,
+        "formatted_timestamp": event.timestamp.format("%H:%M:%S%.3f").to_string(),
+        "iso_timestamp": event.timestamp.to_rfc3339(),
+        "severity_level": match event.details.severity {
+            Severity::Low => 1,
+            Severity::Medium => 2,
+            Severity::High => 3,
+            Severity::Critical => 4,
+        },
+        "event_category": match event.event_type {
+            EventType::FileAccess | EventType::FileModify | EventType::FileCreate | EventType::FileDelete => "filesystem",
+            EventType::DirectoryAccess => "filesystem",
+            EventType::CameraAccess => "privacy",
+            EventType::MicrophoneAccess => "privacy",
+            EventType::SshAccess => "network",
+            EventType::NetworkConnection => "network",
+            EventType::UsbDeviceInserted => "hardware",
+        }
+    });
+
+    println!("{}", json_event);
+
+    // Still log critical events to alert file in JSON mode
+    match (&event.event_type, &event.details.severity) {
+        (EventType::CameraAccess, _) |
+        (EventType::MicrophoneAccess, _) |
+        (_, Severity::Critical) => {
+            send_alert(&event);
+        }
+        _ => {}
     }
 }
 
