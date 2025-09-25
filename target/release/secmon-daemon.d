@@ -1,1 +1,0 @@
-/home/dadmin/codes/projects/ase/target/release/secmon-daemon: /home/dadmin/codes/projects/ase/src/config.rs /home/dadmin/codes/projects/ase/src/device_discovery.rs /home/dadmin/codes/projects/ase/src/error.rs /home/dadmin/codes/projects/ase/src/main.rs /home/dadmin/codes/projects/ase/src/network_monitor.rs /home/dadmin/codes/projects/ase/src/usb_monitor.rs
