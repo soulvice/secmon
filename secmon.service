@@ -1,0 +1,41 @@
+[Unit]
+Description=Security Monitor Daemon
+Documentation=https://github.com/your-username/secmon-daemon
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# Path to the compiled binary
+ExecStart=/usr/local/bin/secmon-daemon /etc/secmon/config.toml
+
+# Restart policy
+Restart=always
+RestartSec=5
+
+# Security settings
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/tmp /var/log /etc/secmon
+
+# Environment
+Environment=RUST_LOG=info
+Environment=RUST_BACKTRACE=1
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=secmon-daemon
+
+# Process management
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

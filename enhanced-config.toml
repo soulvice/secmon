@@ -1,0 +1,137 @@
+socket_path = "/tmp/secmon.sock"
+log_level = "info"
+
+# Notification configuration
+[notifications]
+enabled = true
+dbus_enabled = true
+min_severity = "Medium"
+timeout_ms = 5000
+
+# Event triggers - commands to run when events occur
+[[triggers]]
+name = "Camera Access Alert"
+enabled = true
+event_types = ["CameraAccess"]
+min_severity = "High"
+command = "notify-send"
+args = ["-u", "critical", "-i", "camera-web", "🔴 Security Alert", "Camera access detected: {description}"]
+run_async = true
+cooldown_seconds = 5
+
+[[triggers]]
+name = "SSH Key Access Alert"
+enabled = true
+event_types = ["SshAccess"]
+min_severity = "Critical"
+command = "notify-send"
+args = ["-u", "critical", "-i", "dialog-warning", "🚨 CRITICAL SECURITY ALERT", "SSH key accessed: {path}"]
+run_async = true
+cooldown_seconds = 10
+
+[[triggers]]
+name = "USB Device Alert"
+enabled = true
+event_types = ["UsbDeviceInserted"]
+min_severity = "Medium"
+command = "notify-send"
+args = ["-u", "normal", "-i", "usb", "📱 USB Device", "New USB device inserted"]
+run_async = true
+cooldown_seconds = 3
+
+[[triggers]]
+name = "Microphone Access Alert"
+enabled = true
+event_types = ["MicrophoneAccess"]
+min_severity = "High"
+command = "notify-send"
+args = ["-u", "critical", "-i", "audio-input-microphone", "🎤 Security Alert", "Microphone access detected: {description}"]
+run_async = true
+cooldown_seconds = 5
+
+# Log critical events to file
+[[triggers]]
+name = "Security Log"
+enabled = true
+event_types = ["CameraAccess", "SshAccess", "MicrophoneAccess"]
+min_severity = "High"
+command = "sh"
+args = ["-c", "echo '[{timestamp}] {severity} - {description}' >> /tmp/secmon-alerts.log"]
+run_async = true
+cooldown_seconds = 1
+
+# Custom script trigger (example)
+[[triggers]]
+name = "Custom Security Script"
+enabled = false  # Disabled by default
+event_types = ["CameraAccess", "SshAccess"]
+min_severity = "Critical"
+command = "/usr/local/bin/security-response.sh"
+args = ["{path}", "{severity}", "{description}"]
+run_async = false
+cooldown_seconds = 30
+
+# Monitoring configuration
+[[watches]]
+path = "/dev/video*"
+description = "All camera/video devices"
+enabled = true
+recursive = false
+pattern = true
+auto_discover = true
+
+[[watches]]
+path = "/dev/snd/*"
+description = "All ALSA audio devices"
+enabled = true
+recursive = true
+pattern = true
+auto_discover = true
+
+[[watches]]
+path = "/home"
+description = "Home directories for SSH monitoring"
+enabled = true
+recursive = true
+
+[[watches]]
+path = "/etc/ssh"
+description = "SSH daemon configuration"
+enabled = true
+recursive = true
+
+[[watches]]
+path = "/etc/sudoers"
+description = "Sudo configuration"
+enabled = false  # Disabled - requires root access
+recursive = false
+
+[[watches]]
+path = "/etc/sudoers.d"
+description = "Additional sudo rules"
+enabled = false  # Disabled - requires root access
+recursive = true
+
+[[watches]]
+path = "/etc/hosts"
+description = "Hosts file modifications"
+enabled = true
+recursive = false
+
+[[watches]]
+path = "/etc/systemd/system"
+description = "User-defined systemd services"
+enabled = false  # Disabled - may require elevated access
+recursive = true
+
+[[watches]]
+path = "/etc/cron.d"
+description = "System cron jobs"
+enabled = false  # Disabled - may require elevated access
+recursive = true
+
+[[watches]]
+path = "/var/spool/cron"
+description = "User cron jobs"
+enabled = false  # Disabled - may require elevated access
+recursive = true

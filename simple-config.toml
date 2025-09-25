@@ -1,0 +1,9 @@
+socket_path = "/tmp/secmon-simple.sock"
+log_level = "info"
+
+# Simple monitoring configuration - just home directory
+[[watches]]
+path = "/home"
+description = "Home directories"
+enabled = true
+recursive = false

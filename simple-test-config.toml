@@ -1,0 +1,13 @@
+socket_path = "/tmp/secmon.sock"
+log_level = "info"
+
+[[watches]]
+path = "/tmp"
+description = "Monitor /tmp directory"
+enabled = true
+
+[[watches]]
+path = "/home"
+description = "Monitor home directory for SSH keys"
+enabled = true
+recursive = true

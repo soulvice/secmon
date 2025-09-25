@@ -1,0 +1,52 @@
+socket_path = "/tmp/secmon-user.sock"
+log_level = "info"
+
+# User-accessible monitoring configuration
+# This config avoids privileged paths and focuses on what a regular user can monitor
+
+[[watches]]
+path = "/home"
+description = "Home directories for SSH key monitoring"
+enabled = true
+recursive = true
+
+[[watches]]
+path = "/dev/video*"
+description = "Camera devices (if accessible)"
+enabled = true
+recursive = false
+pattern = true
+auto_discover = true
+
+[[watches]]
+path = "/dev/snd/*"
+description = "Audio devices (if accessible)"
+enabled = true
+recursive = true
+pattern = true
+auto_discover = true
+
+[[watches]]
+path = "/tmp/.pulse*"
+description = "PulseAudio devices"
+enabled = true
+recursive = true
+pattern = true
+auto_discover = true
+
+# Monitor user's own config directories
+[[watches]]
+path = "$HOME/.ssh"
+description = "User SSH configuration"
+enabled = true
+recursive = true
+
+[[watches]]
+path = "$HOME/.config"
+description = "User configuration directory"
+enabled = false
+recursive = true
+
+# Skip system directories that require root:
+# - /etc/ssh (requires root)
+# - /var/log/auth.log (requires root)

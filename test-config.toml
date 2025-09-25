@@ -1,0 +1,10 @@
+socket_path = "/tmp/secmon-test.sock"
+log_level = "info"
+
+[[watches]]
+path = "/tmp/test-watch"
+description = "Test watch directory"
+enabled = true
+recursive = false
+pattern = false
+auto_discover = false
