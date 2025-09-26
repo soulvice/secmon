@@ -76,7 +76,7 @@ pub struct SecurityMonitor {
 
 impl SecurityMonitor {
     pub fn new(config: Config) -> Result<Self> {
-        let (event_sender, event_receiver) = broadcast::channel(1000);
+        let (event_sender, event_receiver) = broadcast::channel(100);
         let inotify = Inotify::init().context("Failed to initialize inotify")?;
         let socket_path = config.socket_path.clone();
 
@@ -308,11 +308,16 @@ impl SecurityMonitor {
 
                     debug!("Security event: {:?}", security_event);
 
-                    // Process triggers for this event
-                    self.process_event_triggers(&security_event).await;
+                    // Check if we should skip this event due to recent similar events (deduplication)
+                    if self.should_process_event(&security_event).await {
+                        // Process triggers for this event
+                        self.process_event_triggers(&security_event).await;
 
-                    if let Err(e) = self.event_sender.send(security_event) {
-                        error!("Failed to send event: {}", e);
+                        if let Err(e) = self.event_sender.send(security_event) {
+                            error!("Failed to send event: {}", e);
+                        }
+                    } else {
+                        debug!("Skipping duplicate event: {:?}", security_event.event_type);
                     }
                 }
             }
@@ -445,6 +450,17 @@ impl SecurityMonitor {
         }
 
         info!("Client disconnected");
+    }
+
+    async fn should_process_event(&self, event: &SecurityEvent) -> bool {
+        // For microphone and camera access, implement deduplication
+        match event.event_type {
+            EventType::MicrophoneAccess | EventType::CameraAccess => {
+                let cooldown_key = format!("{:?}:{}", event.event_type, event.path.display());
+                self.check_trigger_cooldown(&cooldown_key, 30).await // 30 second cooldown for similar events
+            }
+            _ => true, // Process all other events normally
+        }
     }
 
     async fn process_event_triggers(&self, event: &SecurityEvent) {

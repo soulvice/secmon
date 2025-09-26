@@ -1,0 +1,26 @@
+socket_path = "/tmp/custom-secmon.sock"
+log_level = "info"
+
+[[watches]]
+path = "/dev/video0"
+description = "Primary camera"
+enabled = true
+recursive = false
+
+[[watches]]
+path = "/dev/snd/*"
+description = "Audio devices"
+enabled = true
+recursive = true
+pattern = true
+auto_discover = true
+
+[[triggers]]
+name = "camera_alert"
+enabled = true
+event_types = ["CameraAccess"]
+min_severity = "High"
+command = "notify-send"
+args = ["Security Alert", "Camera access detected: {path}"]
+cooldown_seconds = 60
+run_async = true
