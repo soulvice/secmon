@@ -11,6 +11,20 @@ pub struct Config {
     pub notifications: NotificationConfig,
     #[serde(default)]
     pub triggers: Vec<EventTrigger>,
+    #[serde(default)]
+    pub network_ids: NetworkIDSConfig,
+    #[serde(default)]
+    pub display_local_time: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkIDSConfig {
+    pub enabled: bool,
+    pub port_scan_threshold: usize,
+    pub scan_window_seconds: u64,
+    pub ping_threshold: usize,
+    pub monitor_icmp: bool,
+    pub alert_on_discovery: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +73,19 @@ impl Default for NotificationConfig {
     }
 }
 
+impl Default for NetworkIDSConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port_scan_threshold: 10,        // Alert after 10+ ports scanned
+            scan_window_seconds: 60,        // Within 60 seconds
+            ping_threshold: 5,              // Alert after 5+ pings in short time
+            monitor_icmp: false,            // Disabled by default (requires root)
+            alert_on_discovery: true,       // Alert on network discovery attempts
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         let socket_path = std::env::var("XDG_RUNTIME_DIR")
@@ -69,6 +96,7 @@ impl Default for Config {
             socket_path,
             log_level: "info".to_string(),
             notifications: NotificationConfig::default(),
+            display_local_time: true,
             triggers: vec![
                 EventTrigger {
                     name: "Camera Access Alert".to_string(),
@@ -99,6 +127,35 @@ impl Default for Config {
                     ],
                     run_async: true,
                     cooldown_seconds: 10,
+                },
+                EventTrigger {
+                    name: "Port Scan Alert".to_string(),
+                    enabled: true,
+                    event_types: vec!["PortScanDetected".to_string()],
+                    min_severity: "High".to_string(),
+                    command: "notify-send".to_string(),
+                    args: vec![
+                        "-u".to_string(),
+                        "critical".to_string(),
+                        "Security Alert".to_string(),
+                        "Port scan detected from external source!".to_string(),
+                    ],
+                    run_async: true,
+                    cooldown_seconds: 30,
+                },
+                EventTrigger {
+                    name: "Network Discovery Alert".to_string(),
+                    enabled: true,
+                    event_types: vec!["NetworkDiscovery".to_string()],
+                    min_severity: "Medium".to_string(),
+                    command: "logger".to_string(),
+                    args: vec![
+                        "-p".to_string(),
+                        "security.warning".to_string(),
+                        "Network discovery attempt detected".to_string(),
+                    ],
+                    run_async: true,
+                    cooldown_seconds: 60,
                 },
             ],
             watches: vec![
@@ -162,6 +219,7 @@ impl Default for Config {
                     auto_discover: false,
                 },
             ],
+            network_ids: NetworkIDSConfig::default(),
         }
     }
 }

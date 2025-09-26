@@ -1,6 +1,6 @@
 [package]
 name = "secmon-daemon"
-version = "0.1.2"
+version = "0.1.4"
 edition = "2021"
 authors = ["s0ul"]
 description = "A security monitoring daemon for Linux filesystem events"
@@ -12,6 +12,10 @@ path = "src/main.rs"
 [[bin]]
 name = "secmon-client"
 path = "src/bin/client.rs"
+
+[[bin]]
+name = "secmon-msg"
+path = "src/bin/msg.rs"
 
 [dependencies]
 # Filesystem monitoring
@@ -37,6 +41,7 @@ thiserror = "1.0"
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.8"
 
 # Signal handling
 signal-hook = "0.3"
@@ -78,3 +83,13 @@ chrono-humanize = "0.2"
 
 # Regex for filtering
 regex = "1.10"
+
+# TTY detection for stdin handling
+atty = "0.2"
+
+# Network monitoring and packet capture
+socket2 = "0.5"
+nix = "0.29"
+
+# IP address parsing
+ipnetwork = "0.20"

@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::UnixStream;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Utc, Local};
+use chrono_tz::Tz;
 use log::{info, error, warn};
 use std::os::unix::fs::FileTypeExt;
 use std::sync::{Arc, Mutex};
@@ -15,6 +16,41 @@ use toml::Value;
 
 // For daemon control
 extern crate libc;
+
+// Helper function to format timestamps according to display preference
+fn format_timestamp(timestamp: &DateTime<Utc>, format_str: &str) -> String {
+    let use_local_time = get_display_local_time_setting();
+    if use_local_time {
+        let local_time: DateTime<Local> = timestamp.with_timezone(&Local);
+        local_time.format(format_str).to_string()
+    } else {
+        timestamp.format(format_str).to_string()
+    }
+}
+
+// Get display_local_time setting from config file
+fn get_display_local_time_setting() -> bool {
+    let config_paths = [
+        "/etc/secmon/config.toml",
+        "./config.toml",
+        "config.toml"
+    ];
+
+    for config_path in &config_paths {
+        if let Ok(content) = std::fs::read_to_string(config_path) {
+            if let Ok(config) = toml::from_str::<Value>(&content) {
+                if let Some(display_local_time) = config.get("display_local_time") {
+                    if let Some(setting) = display_local_time.as_bool() {
+                        return setting;
+                    }
+                }
+            }
+        }
+    }
+
+    // Default to local time if no config found
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityEvent {
@@ -37,6 +73,10 @@ pub enum EventType {
     MicrophoneAccess,
     NetworkConnection,
     UsbDeviceInserted,
+    NetworkDiscovery,
+    PingDetected,
+    PortScanDetected,
+    CustomMessage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -931,6 +971,12 @@ fn extract_event_type_from_log(line: &str) -> Option<String> {
         Some("SshAccess".to_string())
     } else if line.contains("USB") || line.contains("usb") {
         Some("UsbDeviceInserted".to_string())
+    } else if line.contains("Port scan") || line.contains("port scan") {
+        Some("PortScanDetected".to_string())
+    } else if line.contains("Network discovery") || line.contains("network discovery") {
+        Some("NetworkDiscovery".to_string())
+    } else if line.contains("ICMP ping") || line.contains("ping") {
+        Some("PingDetected".to_string())
     } else if line.contains("Network") || line.contains("network") {
         Some("NetworkConnection".to_string())
     } else {
@@ -1015,6 +1061,9 @@ async fn run_tui_with_socket(socket_path: &str) -> Result<()> {
         should_quit: false,
         connected: false,
         _error_message: None,
+        auto_scroll: true,
+        show_details: false,
+        selected_event_details: None,
     };
 
     // Create channels for events and connection status
@@ -1102,6 +1151,9 @@ struct App {
     should_quit: bool,
     connected: bool,
     _error_message: Option<String>,
+    auto_scroll: bool,
+    show_details: bool,
+    selected_event_details: Option<String>,
 }
 
 async fn run_tui_loop<B>(
@@ -1127,10 +1179,16 @@ where
                 if key.kind == KeyEventKind::Press {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => {
-                            app.should_quit = true;
+                            if app.show_details {
+                                app.show_details = false;
+                                app.selected_event_details = None;
+                            } else {
+                                app.should_quit = true;
+                            }
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            if !app.events.is_empty() {
+                            if !app.show_details && !app.events.is_empty() {
+                                app.auto_scroll = false; // Disable auto-scroll when manually navigating
                                 let i = match app.list_state.selected() {
                                     Some(i) => {
                                         if i >= app.events.len() - 1 {
@@ -1145,7 +1203,8 @@ where
                             }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
-                            if !app.events.is_empty() {
+                            if !app.show_details && !app.events.is_empty() {
+                                app.auto_scroll = false; // Disable auto-scroll when manually navigating
                                 let i = match app.list_state.selected() {
                                     Some(i) => {
                                         if i == 0 {
@@ -1162,6 +1221,24 @@ where
                         KeyCode::Char('c') => {
                             app.events.clear();
                             app.list_state.select(None);
+                            app.auto_scroll = true;
+                            app.show_details = false;
+                            app.selected_event_details = None;
+                        }
+                        KeyCode::Char(' ') => {
+                            if let Some(selected_index) = app.list_state.selected() {
+                                if selected_index < app.events.len() {
+                                    let event = &app.events[selected_index];
+                                    app.selected_event_details = Some(format_event_details(event));
+                                    app.show_details = true;
+                                }
+                            }
+                        }
+                        KeyCode::Char('a') => {
+                            app.auto_scroll = !app.auto_scroll;
+                            if app.auto_scroll && !app.events.is_empty() {
+                                app.list_state.select(Some(app.events.len() - 1));
+                            }
                         }
                         _ => {}
                     }
@@ -1180,10 +1257,20 @@ where
             // Keep only last 1000 events
             if app.events.len() > 1000 {
                 app.events.remove(0);
+                // Adjust selected index if needed
+                if let Some(selected) = app.list_state.selected() {
+                    if selected > 0 {
+                        app.list_state.select(Some(selected - 1));
+                    }
+                }
             }
-            // Auto-select newest event if none selected
-            if app.list_state.selected().is_none() && !app.events.is_empty() {
+
+            // Auto-scroll behavior: always select newest event if auto-scroll is on
+            if app.auto_scroll && !app.events.is_empty() {
                 app.list_state.select(Some(app.events.len() - 1));
+            } else if app.list_state.selected().is_none() && !app.events.is_empty() {
+                // Select first event if nothing is selected and we have events
+                app.list_state.select(Some(0));
             }
         }
 
@@ -1199,9 +1286,14 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     use ratatui::{
         layout::{Constraint, Direction, Layout},
         style::{Color, Modifier, Style},
-        text::{Line, Span},
-        widgets::{Block, Borders, List, ListItem, Paragraph},
+        text::{Line, Span, Text},
+        widgets::{Block, Borders, List, ListItem, Paragraph, Wrap, Clear},
     };
+
+    if app.show_details {
+        render_details_view(f, app);
+        return;
+    }
 
     // Create main layout
     let chunks = Layout::default()
@@ -1210,7 +1302,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(0),
-            Constraint::Length(3),
+            Constraint::Length(4),
         ])
         .split(f.size());
 
@@ -1235,7 +1327,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
 
             let line = Line::from(vec![
                 Span::styled(
-                    format!("[{}] ", event.timestamp.format("%H:%M:%S")),
+                    format!("[{}] ", format_timestamp(&event.timestamp, "%H:%M:%S")),
                     Style::default().fg(Color::Gray),
                 ),
                 Span::styled(
@@ -1262,7 +1354,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
 
     f.render_stateful_widget(event_list, chunks[1], &mut app.list_state);
 
-    // Footer with controls
+    // Footer with controls (now takes 4 lines)
     let status = if app.connected {
         "🟢 Connected to daemon"
     } else if app.events.is_empty() {
@@ -1271,16 +1363,128 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         "🔴 Disconnected from daemon"
     };
 
+    let scroll_status = if app.auto_scroll {
+        "🔄 Auto-scroll: ON"
+    } else {
+        "⏸️ Auto-scroll: OFF"
+    };
+
     let footer_text = format!(
-        "{} | Events: {} | Controls: j/k=navigate, c=clear, q=quit",
+        "{} | Events: {} | {}\nControls: j/k=navigate, space=details, c=clear, a=toggle auto-scroll, q=quit",
         status,
-        app.events.len()
+        app.events.len(),
+        scroll_status
     );
 
     let footer = Paragraph::new(footer_text)
         .style(Style::default().fg(Color::White))
+        .block(Block::default().borders(Borders::ALL))
+        .wrap(Wrap { trim: true });
+    f.render_widget(footer, chunks[2]);
+}
+
+fn render_details_view(f: &mut ratatui::Frame, app: &mut App) {
+    use ratatui::{
+        layout::{Constraint, Direction, Layout, Alignment},
+        style::{Color, Modifier, Style},
+        text::{Line, Span, Text},
+        widgets::{Block, Borders, Paragraph, Wrap, Clear},
+    };
+
+    // Clear the entire screen
+    f.render_widget(Clear, f.size());
+
+    // Create popup layout - centered with margins
+    let popup_area = centered_rect(90, 80, f.size());
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(3),
+        ])
+        .split(popup_area);
+
+    // Header
+    let header = Paragraph::new("Event Details")
+        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(header, chunks[0]);
+
+    // Details content
+    if let Some(details) = &app.selected_event_details {
+        let details_paragraph = Paragraph::new(details.as_str())
+            .style(Style::default().fg(Color::White))
+            .block(Block::default().borders(Borders::ALL).title("Details"))
+            .wrap(Wrap { trim: true });
+        f.render_widget(details_paragraph, chunks[1]);
+    }
+
+    // Footer
+    let footer = Paragraph::new("Press ESC or q to close")
+        .style(Style::default().fg(Color::Yellow))
+        .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(footer, chunks[2]);
+}
+
+// Helper function to center a rectangle
+fn centered_rect(percent_x: u16, percent_y: u16, r: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    use ratatui::layout::{Constraint, Direction, Layout};
+
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}
+
+fn format_event_details(event: &SecurityEvent) -> String {
+    let mut details = String::new();
+
+    details.push_str(&format!("Timestamp: {}\n", format_timestamp(&event.timestamp, "%Y-%m-%d %H:%M:%S")));
+    details.push_str(&format!("Event Type: {:?}\n", event.event_type));
+    details.push_str(&format!("Path: {}\n", event.path.display()));
+    details.push_str(&format!("Severity: {:?}\n", event.details.severity));
+    details.push_str(&format!("Description: {}\n\n", event.details.description));
+
+    if !event.details.metadata.is_empty() {
+        details.push_str("Metadata:\n");
+        for (key, value) in &event.details.metadata {
+            details.push_str(&format!("  {}: {}\n", key, value));
+        }
+        details.push('\n');
+    }
+
+    // Add ISO timestamp for reference
+    details.push_str(&format!("ISO Timestamp: {}\n", event.timestamp.to_rfc3339()));
+
+    // Add event category
+    let category = match event.event_type {
+        EventType::FileAccess | EventType::FileModify | EventType::FileCreate | EventType::FileDelete | EventType::DirectoryAccess => "Filesystem",
+        EventType::CameraAccess | EventType::MicrophoneAccess => "Privacy",
+        EventType::SshAccess | EventType::NetworkConnection | EventType::NetworkDiscovery | EventType::PingDetected => "Network",
+        EventType::PortScanDetected => "Security",
+        EventType::UsbDeviceInserted => "Hardware",
+        EventType::CustomMessage => "Custom",
+    };
+    details.push_str(&format!("Category: {}\n", category));
+
+    details
 }
 
 fn handle_json_event_listen(event: &SecurityEvent) {
@@ -1292,7 +1496,7 @@ fn handle_json_event_listen(event: &SecurityEvent) {
         "severity": event.details.severity,
         "description": event.details.description,
         "metadata": event.details.metadata,
-        "formatted_timestamp": event.timestamp.format("%H:%M:%S%.3f").to_string(),
+        "formatted_timestamp": format_timestamp(&event.timestamp, "%H:%M:%S%.3f"),
         "iso_timestamp": event.timestamp.to_rfc3339(),
         "severity_level": match event.details.severity {
             Severity::Low => 1,
@@ -1307,7 +1511,11 @@ fn handle_json_event_listen(event: &SecurityEvent) {
             EventType::MicrophoneAccess => "privacy",
             EventType::SshAccess => "network",
             EventType::NetworkConnection => "network",
+            EventType::NetworkDiscovery => "network",
+            EventType::PingDetected => "network",
+            EventType::PortScanDetected => "security",
             EventType::UsbDeviceInserted => "hardware",
+            EventType::CustomMessage => "custom",
         }
     });
 
@@ -1323,7 +1531,7 @@ fn handle_security_event_listen(event: &SecurityEvent) {
     };
     let reset_color = "\x1b[0m";
 
-    let timestamp = event.timestamp.format("%H:%M:%S");
+    let timestamp = format_timestamp(&event.timestamp, "%H:%M:%S");
     let event_type = format!("{:?}", event.event_type);
 
     println!(
@@ -1349,7 +1557,7 @@ fn handle_json_event(event: &SecurityEvent) {
         "severity": event.details.severity,
         "description": event.details.description,
         "metadata": event.details.metadata,
-        "formatted_timestamp": event.timestamp.format("%H:%M:%S%.3f").to_string(),
+        "formatted_timestamp": format_timestamp(&event.timestamp, "%H:%M:%S%.3f"),
         "iso_timestamp": event.timestamp.to_rfc3339(),
         "severity_level": match event.details.severity {
             Severity::Low => 1,
@@ -1364,7 +1572,11 @@ fn handle_json_event(event: &SecurityEvent) {
             EventType::MicrophoneAccess => "privacy",
             EventType::SshAccess => "network",
             EventType::NetworkConnection => "network",
+            EventType::NetworkDiscovery => "network",
+            EventType::PingDetected => "network",
+            EventType::PortScanDetected => "security",
             EventType::UsbDeviceInserted => "hardware",
+            EventType::CustomMessage => "custom",
         }
     });
 
@@ -1390,7 +1602,7 @@ fn handle_security_event(event: &SecurityEvent) {
     };
     let reset_color = "\x1b[0m";
 
-    let timestamp = event.timestamp.format("%H:%M:%S");
+    let timestamp = format_timestamp(&event.timestamp, "%H:%M:%S");
     let event_type = format!("{:?}", event.event_type);
 
     println!(
@@ -1424,9 +1636,26 @@ fn handle_security_event(event: &SecurityEvent) {
         (EventType::NetworkConnection, Severity::High) => {
             warn!("🌐 SUSPICIOUS NETWORK CONNECTION: {}", event.details.description);
         }
+        (EventType::PortScanDetected, _) => {
+            warn!("🚨 PORT SCAN DETECTED: {}", event.details.description);
+            send_alert(&event);
+        }
+        (EventType::NetworkDiscovery, _) => {
+            warn!("🔍 NETWORK DISCOVERY DETECTED: {}", event.details.description);
+        }
+        (EventType::PingDetected, Severity::Medium | Severity::High) => {
+            warn!("📡 SUSPICIOUS PING ACTIVITY: {}", event.details.description);
+        }
         (_, Severity::Critical) => {
             warn!("🚨 CRITICAL SECURITY EVENT: {}", event.details.description);
             send_alert(&event);
+        }
+        (EventType::CustomMessage, Severity::High | Severity::Critical) => {
+            warn!("📢 CUSTOM ALERT: {}", event.details.description);
+            send_alert(&event);
+        }
+        (EventType::CustomMessage, Severity::Medium) => {
+            info!("📢 Custom message: {}", event.details.description);
         }
         (_, Severity::High) => {
             warn!("⚠️  High severity event: {}", event.details.description);
@@ -1444,7 +1673,7 @@ fn send_alert(event: &SecurityEvent) {
         .and_then(|mut file| {
             use std::io::Write;
             writeln!(file, "[{}] CRITICAL: {} - {}",
-                event.timestamp.format("%Y-%m-%d %H:%M:%S"),
+                format_timestamp(&event.timestamp, "%Y-%m-%d %H:%M:%S"),
                 event.path.display(),
                 event.details.description
             )

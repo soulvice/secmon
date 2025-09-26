@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::os::unix::fs::PermissionsExt;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::UnixListenerStream;
@@ -18,12 +18,14 @@ mod error;
 mod network_monitor;
 mod usb_monitor;
 mod device_discovery;
+mod network_ids;
 
-use config::{Config, WatchConfig, EventTrigger, NotificationConfig};
+use config::{Config, WatchConfig, EventTrigger, NotificationConfig, NetworkIDSConfig};
 use error::SecmonError;
 use network_monitor::NetworkMonitor;
 use usb_monitor::UsbMonitor;
 use device_discovery::DeviceDiscovery;
+use network_ids::NetworkIDS;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityEvent {
@@ -46,6 +48,10 @@ pub enum EventType {
     MicrophoneAccess,
     NetworkConnection,
     UsbDeviceInserted,
+    NetworkDiscovery,
+    PingDetected,
+    PortScanDetected,
+    CustomMessage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,6 +158,25 @@ impl SecurityMonitor {
             })
         });
 
+        // Start Network IDS monitoring (if enabled)
+        let event_sender_ids = self.event_sender.clone();
+        let ids_config = self.config.network_ids.clone();
+        let ids_task = tokio::spawn(async move {
+            if ids_config.enabled {
+                let mut network_ids = NetworkIDS::new(
+                    event_sender_ids,
+                    ids_config.port_scan_threshold,
+                    ids_config.scan_window_seconds,
+                    ids_config.ping_threshold
+                );
+                if let Err(e) = network_ids.start_monitoring().await {
+                    error!("Network IDS monitoring error: {}", e);
+                }
+            } else {
+                info!("Network IDS monitoring disabled in configuration");
+            }
+        });
+
         // Run filesystem monitoring in the main task
         let filesystem_task = async {
             if let Err(e) = self.monitor_events().await {
@@ -175,6 +200,11 @@ impl SecurityMonitor {
             result = usb_task => {
                 if let Err(e) = result {
                     error!("USB task error: {}", e);
+                }
+            },
+            result = ids_task => {
+                if let Err(e) = result {
+                    error!("Network IDS task error: {}", e);
                 }
             },
             result = filesystem_task => {
@@ -411,7 +441,8 @@ impl SecurityMonitor {
             match stream {
                 Ok(stream) => {
                     let receiver = event_sender.subscribe();
-                    tokio::spawn(Self::handle_client(stream, receiver));
+                    let sender_for_client = event_sender.clone();
+                    tokio::spawn(Self::handle_client(stream, receiver, sender_for_client));
                 }
                 Err(e) => {
                     error!("Failed to accept connection: {}", e);
@@ -420,32 +451,94 @@ impl SecurityMonitor {
         }
     }
 
-    async fn handle_client(mut stream: UnixStream, mut receiver: broadcast::Receiver<SecurityEvent>) {
+    async fn handle_client(
+        stream: UnixStream,
+        mut receiver: broadcast::Receiver<SecurityEvent>,
+        sender: broadcast::Sender<SecurityEvent>
+    ) {
         info!("New client connected");
 
-        loop {
-            match receiver.recv().await {
-                Ok(event) => {
-                    match serde_json::to_string(&event) {
-                        Ok(json) => {
-                            let message = format!("{}\n", json);
-                            if let Err(e) = stream.write_all(message.as_bytes()).await {
-                                debug!("Client disconnected: {}", e);
-                                break;
+        // Split the stream for reading and writing
+        let (reader, writer) = stream.into_split();
+        let mut buf_reader = BufReader::new(reader);
+        let mut writer = writer;
+
+        // Spawn a task to handle incoming messages from client
+        let sender_for_reader = sender.clone();
+        let read_task = tokio::spawn(async move {
+            let mut line_buffer = String::new();
+            loop {
+                line_buffer.clear();
+                match buf_reader.read_line(&mut line_buffer).await {
+                    Ok(0) => {
+                        debug!("Client closed connection");
+                        break;
+                    }
+                    Ok(_) => {
+                        let trimmed_line = line_buffer.trim();
+                        if !trimmed_line.is_empty() {
+                            // Try to parse as SecurityEvent
+                            match serde_json::from_str::<SecurityEvent>(trimmed_line) {
+                                Ok(mut event) => {
+                                    // Ensure timestamp is current for received messages
+                                    event.timestamp = Utc::now();
+                                    info!("Received custom event: {:?} - {}", event.event_type, event.details.description);
+
+                                    // Broadcast the received event
+                                    if let Err(e) = sender_for_reader.send(event) {
+                                        error!("Failed to broadcast received event: {}", e);
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Failed to parse received message as SecurityEvent: {} - Message: {}", e, trimmed_line);
+                                }
                             }
                         }
-                        Err(e) => {
-                            error!("Failed to serialize event: {}", e);
-                        }
+                    }
+                    Err(e) => {
+                        debug!("Error reading from client: {}", e);
+                        break;
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    warn!("Client lagging, dropping events");
+            }
+        });
+
+        // Handle outgoing events to client
+        let write_task = tokio::spawn(async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(event) => {
+                        match serde_json::to_string(&event) {
+                            Ok(json) => {
+                                let message = format!("{}\n", json);
+                                if let Err(e) = writer.write_all(message.as_bytes()).await {
+                                    debug!("Client disconnected while writing: {}", e);
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to serialize event: {}", e);
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        warn!("Client lagging, dropping events");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        debug!("Event channel closed");
+                        break;
+                    }
                 }
-                Err(broadcast::error::RecvError::Closed) => {
-                    debug!("Event channel closed");
-                    break;
-                }
+            }
+        });
+
+        // Wait for either task to complete
+        tokio::select! {
+            _ = read_task => {
+                debug!("Client read task completed");
+            }
+            _ = write_task => {
+                debug!("Client write task completed");
             }
         }
 
@@ -478,11 +571,15 @@ impl SecurityMonitor {
                 EventType::MicrophoneAccess => "MicrophoneAccess",
                 EventType::NetworkConnection => "NetworkConnection",
                 EventType::UsbDeviceInserted => "UsbDeviceInserted",
+                EventType::NetworkDiscovery => "NetworkDiscovery",
+                EventType::PingDetected => "PingDetected",
+                EventType::PortScanDetected => "PortScanDetected",
                 EventType::FileAccess => "FileAccess",
                 EventType::FileModify => "FileModify",
                 EventType::FileCreate => "FileCreate",
                 EventType::FileDelete => "FileDelete",
                 EventType::DirectoryAccess => "DirectoryAccess",
+                EventType::CustomMessage => "CustomMessage",
             };
 
             if !trigger.event_types.contains(&event_type_str.to_string()) {
